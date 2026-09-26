@@ -4,10 +4,13 @@ export function Clock() {
     const [time, setTime] = useState(new Date());
 
     useEffect(() => {
+        // Function to update time
         const tick = () => setTime(new Date());
 
+        // Set up an interval to update the clock every second
         const intervalId = setInterval(tick, 1000);
 
+        // Clear the interval on component unmount
         return () => clearInterval(intervalId);
     }, []);
 
@@ -20,18 +23,16 @@ export function Clock() {
     };
 
     return (
-        <div style={styles.clock}>
-            {formatTime(time)}
-        </div>
+        <span style={styles.clock}>{formatTime(time)}</span>
     );
 };
 
+// Uses the design-system font token.
 const styles = {
     clock: {
-        fontFamily: 'Arial, sans-serif',
-        fontSize: '2em',
-        textAlign: 'center',
-        margin: '20px',
+        fontFamily: 'var(--font-mono)',
+        fontSize: '2rem',
+        fontWeight: 700,
     },
 };
 

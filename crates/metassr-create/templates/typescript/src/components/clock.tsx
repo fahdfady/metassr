@@ -23,19 +23,16 @@ const Clock: React.FC = () => {
     };
 
     return (
-        <div style={styles.clock}>
-            {formatTime(time)}
-        </div>
+        <span style={styles.clock}>{formatTime(time)}</span>
     );
 };
 
-// Basic styles for the clock
+// Uses the design-system font token.
 const styles = {
     clock: {
-        fontFamily: 'Arial, sans-serif',
-        fontSize: '2em',
-        textAlign: 'center',
-        margin: '20px',
+        fontFamily: 'var(--font-mono)',
+        fontSize: '2rem',
+        fontWeight: 700,
     },
 };
 
