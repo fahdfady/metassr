@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-10-03T16:23:11.763566",
+  "server": "http://localhost:8080",
+  "system": {
+    "os": "Linux",
+    "os_version": "6.17.0-1022-azure",
+    "arch": "x86_64",
+    "python": "3.11.16",
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "cpu_cores": 4,
+    "memory_gb": 15.6
+  },
+  "tests": [
+    {
+      "name": "Light",
+      "threads": 1,
+      "connections": 10,
+      "duration": 20,
+      "rps": 91303.18,
+      "latency": "86.72us",
+      "latency_ms": 0.08672,
+      "p99": "161.00us",
+      "p99_ms": 0.161,
+      "requests": 1826103,
+      "errors": 0,
+      "memory_mb": 69.9
+    },
+    {
+      "name": "Medium",
+      "threads": 4,
+      "connections": 50,
+      "duration": 40,
+      "rps": 135701.59,
+      "latency": "347.75us",
+      "latency_ms": 0.34775,
+      "p99": "1.29ms",
+      "p99_ms": 1.29,
+      "requests": 5429477,
+      "errors": 0,
+      "memory_mb": 70.2
+    },
+    {
+      "name": "Heavy",
+      "threads": 8,
+      "connections": 200,
+      "duration": 80,
+      "rps": 140797.89,
+      "latency": "1.41ms",
+      "latency_ms": 1.41,
+      "p99": "4.09ms",
+      "p99_ms": 4.09,
+      "requests": 11274131,
+      "errors": 0,
+      "memory_mb": 77.1
+    },
+    {
+      "name": "Stress",
+      "threads": 12,
+      "connections": 500,
+      "duration": 120,
+      "rps": 134763.75,
+      "latency": "3.63ms",
+      "latency_ms": 3.63,
+      "p99": "9.28ms",
+      "p99_ms": 9.28,
+      "requests": 16184361,
+      "errors": 0,
+      "memory_mb": 86.0
+    }
+  ]
+}
