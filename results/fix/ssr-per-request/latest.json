@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-13T22:19:20.767575",
+  "timestamp": "2026-10-17T04:52:21.971391",
   "server": "http://localhost:8080",
   "system": {
     "os": "Linux",
@@ -16,56 +16,56 @@
       "threads": 1,
       "connections": 10,
       "duration": 20,
-      "rps": 17275.9,
-      "latency": "578.09us",
-      "latency_ms": 0.57809,
-      "p99": "0.96ms",
-      "p99_ms": 0.96,
-      "requests": 347244,
+      "rps": 17182.23,
+      "latency": "580.57us",
+      "latency_ms": 0.58057,
+      "p99": "0.93ms",
+      "p99_ms": 0.93,
+      "requests": 343648,
       "errors": 0,
-      "memory_mb": 102.3
+      "memory_mb": 101.5
     },
     {
       "name": "Medium",
       "threads": 4,
       "connections": 50,
       "duration": 40,
-      "rps": 17471.57,
+      "rps": 17499.81,
       "latency": "2.74ms",
       "latency_ms": 2.74,
-      "p99": "4.94ms",
-      "p99_ms": 4.94,
-      "requests": 700619,
+      "p99": "4.98ms",
+      "p99_ms": 4.98,
+      "requests": 701726,
       "errors": 0,
-      "memory_mb": 103.8
+      "memory_mb": 103.1
     },
     {
       "name": "Heavy",
       "threads": 8,
       "connections": 200,
       "duration": 80,
-      "rps": 17318.48,
-      "latency": "11.55ms",
-      "latency_ms": 11.55,
-      "p99": "21.08ms",
-      "p99_ms": 21.08,
-      "requests": 1385854,
+      "rps": 17435.93,
+      "latency": "11.48ms",
+      "latency_ms": 11.48,
+      "p99": "21.89ms",
+      "p99_ms": 21.89,
+      "requests": 1395245,
       "errors": 0,
-      "memory_mb": 109.4
+      "memory_mb": 108.8
     },
     {
       "name": "Stress",
       "threads": 12,
       "connections": 500,
       "duration": 120,
-      "rps": 17608.19,
-      "latency": "28.26ms",
-      "latency_ms": 28.26,
-      "p99": "68.05ms",
-      "p99_ms": 68.05,
-      "requests": 2113945,
+      "rps": 17680.48,
+      "latency": "28.59ms",
+      "latency_ms": 28.59,
+      "p99": "72.68ms",
+      "p99_ms": 72.68,
+      "requests": 2122596,
       "errors": 0,
-      "memory_mb": 120.4
+      "memory_mb": 119.7
     }
   ]
 }
