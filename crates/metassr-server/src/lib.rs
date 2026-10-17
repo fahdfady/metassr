@@ -1,7 +1,9 @@
+mod api_reload;
 mod fallback;
 mod handler;
 mod layers;
 pub mod live_reload;
+mod pages_reload;
 mod router;
 
 use fallback::Fallback;
@@ -13,6 +15,7 @@ use axum::routing::get;
 use axum::{http::StatusCode, response::Redirect, Router};
 use live_reload::LiveReloadServer;
 use metassr_build::rebuilder::Rebuilder;
+use metassr_devtools::DebugHub;
 use router::RouterMut;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -93,12 +96,22 @@ impl Server {
             .nest_service("/static", ServeDir::new(&static_dir))
             .nest_service("/dist", ServeDir::new(&dist_dir));
 
+        let mut debug_hub = None;
+
         if let ServerMode::Development = self.configs.mode {
             debug!("Configuring server for development mode");
             let ws_port = self.configs.ws_port;
-            // Inject the ws_port into the live-reload script at runtime
+
+            // Hub that collects devtools events (API traces, ...) for the panel.
+            let hub = Arc::new(DebugHub::default());
+            debug_hub = Some(Arc::clone(&hub));
+
+            // Inject the ws_port into the browser scripts at runtime
             let live_reload_script =
                 include_str!("scripts/live-reload.js").replace("__WS_PORT__", &ws_port.to_string());
+            let devtools_script =
+                include_str!("scripts/devtools.js").replace("__WS_PORT__", &ws_port.to_string());
+
             base_router = base_router.route(
                 "/livereload/script.js",
                 get(move || {
@@ -112,10 +125,23 @@ impl Server {
                     }
                 }),
             );
+            base_router = base_router.route(
+                "/__metassr/devtools.js",
+                get(move || {
+                    let script = devtools_script.clone();
+                    async move {
+                        debug!("Serving devtools.js");
+                        axum::response::Response::builder()
+                            .header("Content-Type", "application/javascript")
+                            .body(script)
+                            .unwrap()
+                    }
+                }),
+            );
             // Apply live reload middleware
             base_router = base_router.layer(axum::middleware::from_fn(inject_live_reload_script));
 
-            // Start the WebSocket server for live reload
+            // Start the WebSocket server for live reload + devtools
             let ws_listener = bind_http_listener_with_fallback(ws_port)
                 .await
                 .map_err(|e| anyhow::anyhow!("WebSocket bind error: {}", e))?;
@@ -126,9 +152,12 @@ impl Server {
             if let Some(rebuilder) = self.configs.rebuilder.clone() {
                 tokio::spawn(async move {
                     while let Ok((stream, _)) = ws_listener.accept().await {
-                        let live_reload =
-                            LiveReloadServer::new(rebuilder.subscribe(), rebuilder.last_errors());
-                        // live_reload.handle_connection(socket).await;
+                        let live_reload = LiveReloadServer::new(
+                            rebuilder.subscribe(),
+                            rebuilder.last_errors(),
+                            hub.subscribe(),
+                            hub.history(),
+                        );
                         tokio::spawn(live_reload.handle_connection(stream));
                     }
                 });
@@ -157,12 +186,19 @@ impl Server {
         }
 
         // Register API routes from ./src/api/ directory
-        // This scans for .js files and registers GET/POST handlers
+        // This scans for .js/.py/.rb files and registers HTTP method handlers
+        let mut api_routes_handle = None;
         let src_path = self.configs.root_path.join("src");
         if src_path.join("api").exists() {
-            match metassr_api_handler::register_api_routes(app.app(), &self.configs.root_path).await
+            match metassr_api_handler::register_api_routes(
+                app.app(),
+                &self.configs.root_path,
+                debug_hub.clone(),
+            )
+            .await
             {
-                Ok((router_with_api, Some(_api_routes))) => {
+                Ok((router_with_api, Some(api_routes))) => {
+                    api_routes_handle = Some(api_routes);
                     app = RouterMut::from(router_with_api);
                     info!("API routes registered successfully");
                 }
@@ -176,7 +212,28 @@ impl Server {
             }
         }
 
-        PagesHandler::new(&mut app, &dist_dir, self.configs.running_type)?.build()?;
+        let page_registry =
+            PagesHandler::new(&mut app, &dist_dir, self.configs.running_type)?.build()?;
+
+        // In development, keep the running MetaCall handles in sync with the
+        // rebuilt bundles/scripts.
+        if let ServerMode::Development = self.configs.mode {
+            if let Some(rebuilder) = self.configs.rebuilder.clone() {
+                tokio::spawn(pages_reload::watch_pages(
+                    rebuilder.subscribe(),
+                    page_registry,
+                    PathBuf::from(&dist_dir),
+                ));
+
+                if let Some(api_routes) = api_routes_handle {
+                    tokio::spawn(api_reload::watch_api_routes(
+                        rebuilder.subscribe(),
+                        rebuilder,
+                        api_routes,
+                    ));
+                }
+            }
+        }
 
         // Apply middleware again after PagesHandler to catch dynamic HTML
         if let ServerMode::Development = self.configs.mode {

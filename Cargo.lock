@@ -957,6 +957,7 @@ dependencies = [
  "lock_freedom",
  "metacall",
  "metacall-sys",
+ "metassr-devtools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1047,6 +1048,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "metassr-devtools"
+version = "1.0.0-alpha"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "metassr-fs-analyzer"
 version = "1.0.0-alpha"
 dependencies = [
@@ -1076,6 +1086,7 @@ dependencies = [
  "metacall-sys",
  "metassr-api-handler",
  "metassr-build",
+ "metassr-devtools",
  "metassr-fs-analyzer",
  "metassr-utils",
  "notify",

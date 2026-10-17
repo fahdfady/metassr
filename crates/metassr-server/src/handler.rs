@@ -10,12 +10,21 @@ use metassr_fs_analyzer::{
     dist_dir::{DistDir, PageEntry},
     DirectoryAnalyzer,
 };
-use std::{collections::HashMap, fs::read_to_string, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs::read_to_string,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 use tracing::error;
 
 use crate::RunningType;
 
 use super::router::RouterMut;
+
+/// Shared, swappable renderers keyed by route. The dev server uses this to
+/// reload MetaCall handles after a page rebuild.
+pub type PageRegistry = Arc<HashMap<String, Arc<RwLock<PageRenderer>>>>;
 
 /// How a registered page route produces its HTML body.
 #[derive(Clone)]
@@ -23,7 +32,7 @@ enum PageSource {
     /// Pre-rendered HTML read from disk (SSG).
     Static(String),
     /// Renderer re-invoked on every request (SSR).
-    Dynamic(Arc<PageRenderer>),
+    Dynamic(Arc<RwLock<PageRenderer>>),
 }
 
 pub struct PagesHandler<'a, S: Clone + Send + Sync + 'static> {
@@ -46,15 +55,24 @@ impl<'a, S: Clone + Send + Sync + 'static> PagesHandler<'a, S> {
             running_type,
         })
     }
-    pub fn build(&mut self) -> Result<()> {
+    /// Registers all page routes and returns the SSR renderer registry so the
+    /// dev server can swap renderers after rebuilds. Empty for SSG.
+    pub fn build(&mut self) -> Result<PageRegistry> {
+        let mut registry: HashMap<String, Arc<RwLock<PageRenderer>>> = HashMap::new();
+
         for (route, entries) in self.pages.iter() {
             let source = match self.running_type {
                 RunningType::StaticSiteGeneration => {
                     PageSource::Static(read_to_string(entries.path.join("index.html"))?)
                 }
-                RunningType::ServerSideRendering => PageSource::Dynamic(Arc::new(
-                    PageRenderer::from_manifest(&self.dist_dir, route)?,
-                )),
+                RunningType::ServerSideRendering => {
+                    let renderer = Arc::new(RwLock::new(PageRenderer::from_manifest(
+                        &self.dist_dir,
+                        route,
+                    )?));
+                    registry.insert(route.clone(), Arc::clone(&renderer));
+                    PageSource::Dynamic(renderer)
+                }
             };
 
             let handler =
@@ -62,7 +80,7 @@ impl<'a, S: Clone + Send + Sync + 'static> PagesHandler<'a, S> {
                       Path(_path): Path<HashMap<String, String>>| async move {
                     match &source {
                         PageSource::Static(html) => Html(html.clone()).into_response(),
-                        PageSource::Dynamic(renderer) => match renderer.render() {
+                        PageSource::Dynamic(renderer) => match renderer.read().unwrap().render() {
                             Ok(html) => Html(html).into_response(),
                             Err(e) => {
                                 error!("SSR render failed: {e:?}");
@@ -82,7 +100,8 @@ impl<'a, S: Clone + Send + Sync + 'static> PagesHandler<'a, S> {
             );
             self.app.route(&route, get(handler));
         }
-        Ok(())
+
+        Ok(Arc::new(registry))
     }
 }
 

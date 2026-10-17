@@ -52,3 +52,4 @@ pub mod checker;
 /// ```
 pub mod js_path;
 pub mod rand;
+pub mod routes;

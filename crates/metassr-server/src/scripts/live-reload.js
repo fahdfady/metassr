@@ -182,6 +182,10 @@
 					dismissErrorOverlay();
 					reloadStylesheets();
 					break
+				case 'api':
+					// API scripts are reloaded server-side; nothing to do in the page.
+					dismissErrorOverlay();
+					break
 				case 'component':
 					// this reloads the page anyways, this solution is temporary
 					// Todo: make a function reloadComponent(update.path);

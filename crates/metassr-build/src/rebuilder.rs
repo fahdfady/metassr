@@ -44,6 +44,8 @@ impl Drop for RebuildGuard<'_> {
 pub enum RebuildType {
     /// Rebuild a single page. page's path is provided
     Page(PathBuf),
+    /// Reload a single API route script. Its path is provided.
+    Api(PathBuf),
     Layout,
     // Rebuild a single Component.
     Component,
@@ -61,6 +63,9 @@ impl fmt::Display for RebuildType {
         match self {
             RebuildType::Page(path) => {
                 write!(f, "page:{}", path.to_string_lossy())
+            }
+            RebuildType::Api(path) => {
+                write!(f, "api:{}", path.to_string_lossy())
             }
             RebuildType::Layout => write!(f, "layout"),
             RebuildType::Component => write!(f, "component"),
@@ -114,6 +119,14 @@ impl Rebuilder {
         *self.last_errors.lock().unwrap() = None;
     }
 
+    /// Caches and broadcasts a build error so the browser overlay picks it up.
+    /// Used by reload paths that fail outside [`rebuild`](Self::rebuild), like
+    /// API route hot-reload.
+    pub fn notify_build_error(&self, errors: Vec<String>) {
+        self.set_last_errors(errors.clone());
+        let _ = self.sender.send(RebuildType::BuildError { errors });
+    }
+
     pub fn handle_event(&self, event: DebouncedEvent) -> Result<Option<RebuildType>> {
         if !is_relevant_event(&event) {
             return Ok(None);
@@ -137,6 +150,7 @@ impl Rebuilder {
 
         let rebuild_type: RebuildType = match path_str {
             path if path.starts_with("src/pages") => RebuildType::Page(path_buf.clone()),
+            path if path.starts_with("src/api") => RebuildType::Api(path_buf.clone()),
             path if path.starts_with("src/layout") => RebuildType::Layout,
             path if path.starts_with("src/components") => RebuildType::Component,
             path if path.starts_with("src/styles") => RebuildType::Style,
@@ -171,6 +185,21 @@ impl Rebuilder {
                 }
 
                 self.clear_last_errors();
+                match self.sender.send(rebuild_type.clone()) {
+                    Ok(rec) => {
+                        debug!("Sent to: {rec} receivers")
+                    }
+                    Err(e) => {
+                        debug!("FULL CHANNEL: {e}");
+                    }
+                };
+            }
+            RebuildType::Api(ref path) => {
+                debug!("entered reloading API route {:?}", path);
+
+                // API scripts are executed straight from source, so there is
+                // nothing to bundle. Broadcasting lets the running server reload
+                // the MetaCall handle and the devtools panel show the event.
                 match self.sender.send(rebuild_type.clone()) {
                     Ok(rec) => {
                         debug!("Sent to: {rec} receivers")
@@ -288,6 +317,65 @@ mod tests {
             }
             other => panic!("expected page rebuild type, got {}", other),
         }
+    }
+
+    #[test]
+    fn map_path_to_type_detects_api_paths() {
+        let rebuilder = test_rebuilder();
+        let result = rebuilder
+            .map_path_to_type(Path::new("src/api/users/list.py"))
+            .unwrap();
+
+        match result {
+            RebuildType::Api(path) => {
+                assert_eq!(path, PathBuf::from("src/api/users/list.py"));
+            }
+            other => panic!("expected api rebuild type, got {}", other),
+        }
+    }
+
+    #[test]
+    fn api_rebuild_broadcasts_without_bundling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rebuilder = Rebuilder::new(
+            tmp.path().to_path_buf(),
+            BuildingType::ServerSideRendering,
+            PathBuf::from("dist"),
+        )
+        .unwrap();
+        let mut rx = rebuilder.subscribe();
+
+        rebuilder
+            .rebuild(RebuildType::Api(PathBuf::from("src/api/hello.js")))
+            .unwrap();
+
+        match rx.try_recv().unwrap() {
+            RebuildType::Api(path) => assert_eq!(path, PathBuf::from("src/api/hello.js")),
+            other => panic!("expected api rebuild event, got {}", other),
+        }
+    }
+
+    #[test]
+    fn notify_build_error_broadcasts_and_caches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rebuilder = Rebuilder::new(
+            tmp.path().to_path_buf(),
+            BuildingType::ServerSideRendering,
+            PathBuf::from("dist"),
+        )
+        .unwrap();
+        let mut rx = rebuilder.subscribe();
+
+        rebuilder.notify_build_error(vec!["boom".to_string()]);
+
+        match rx.try_recv().unwrap() {
+            RebuildType::BuildError { errors } => assert_eq!(errors, vec!["boom".to_string()]),
+            other => panic!("expected build error event, got {}", other),
+        }
+        assert_eq!(
+            rebuilder.last_errors().lock().unwrap().clone(),
+            Some(vec!["boom".to_string()])
+        );
     }
 
     #[test]

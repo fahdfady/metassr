@@ -143,6 +143,23 @@ metassr dev [OPTIONS]
 metassr dev --port 3000 --ws-port 3001
 ```
 
+**DevTools panel:**
+
+In development mode a floating **MetaSSR** badge is injected into every page.
+Click it to open the devtools panel, which shows:
+
+- **API traces** — every call to a route under `src/api/` with its loader
+  (`node`, `python`, `ruby`), status, duration and captured request/response
+  payloads. Click a row to inspect the full JSON.
+- **API hot-reload** — edits to `src/api/*` reload the MetaCall handle in the
+  running server; the panel logs each reload.
+- **Build errors** — compilation failures are listed in the panel and shown in
+  the full-screen overlay.
+
+Page edits rebuild the page and swap the SSR renderer in the running server, so
+no restart is needed. Development bundles include sourcemaps, so the browser
+devtools map bundles back to the original `.tsx`/`.ts` sources.
+
 ---
 
 ### `create`

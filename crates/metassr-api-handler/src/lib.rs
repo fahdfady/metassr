@@ -42,16 +42,29 @@ use metacall::{
     load::{self, Handle, Tag},
     metacall_handle,
 };
+use metassr_devtools::{truncate_payload, ApiTraceEvent, DebugEvent, DebugHub};
 use scanner::{scan_api_dir, ApiRouteFile};
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 use tracing::{debug, error, info, warn};
 use types::{ApiRequest, ApiResponse};
+
+/// Human-readable loader name for a MetaCall tag.
+fn loader_name(tag: Tag) -> &'static str {
+    match tag {
+        Tag::NodeJS => "node",
+        Tag::Python => "python",
+        Tag::Ruby => "ruby",
+        _ => "other",
+    }
+}
 
 /// Stores loaded API route scripts and their MetaCall handles.
 pub struct ApiRoutes {
     handles: Map<String, Handle>,
     /// List of discovered route files.
     routes: Vec<ApiRouteFile>,
+    /// Optional dev-mode hub that receives per-call traces.
+    debug_hub: Option<Arc<DebugHub>>,
 }
 
 impl ApiRoutes {
@@ -60,7 +73,14 @@ impl ApiRoutes {
         Self {
             handles: Map::new(),
             routes: Vec::new(),
+            debug_hub: None,
         }
+    }
+
+    /// Attach a devtools hub so every API call is traced for the in-page panel.
+    pub fn with_debug_hub(mut self, hub: Arc<DebugHub>) -> Self {
+        self.debug_hub = Some(hub);
+        self
     }
 
     /// Scan the given API directory and load all script files.
@@ -174,9 +194,11 @@ impl Default for ApiRoutes {
 /// # Arguments
 /// * `router` - The Axum router to add routes to
 /// * `root_path` - Root path of the project (to find `./src/api/`)
+/// * `debug_hub` - Optional dev-mode hub that receives per-call traces
 pub async fn register_api_routes(
     mut router: Router,
     root_path: &Path,
+    debug_hub: Option<Arc<DebugHub>>,
 ) -> Result<(Router, Option<Arc<ApiRoutes>>)> {
     let api_dir = root_path.join("src").join("api");
 
@@ -189,6 +211,9 @@ pub async fn register_api_routes(
     }
 
     let mut api_routes = ApiRoutes::new();
+    if let Some(hub) = debug_hub {
+        api_routes = api_routes.with_debug_hub(hub);
+    }
     api_routes.load_from_dir(&api_dir).await?;
 
     if api_routes.routes().is_empty() {
@@ -203,22 +228,25 @@ pub async fn register_api_routes(
             (
                 r.route_path.clone(),
                 r.file_path.to_string_lossy().to_string(),
+                loader_name(r.tag),
             )
         })
         .collect();
 
     let api_routes = Arc::new(api_routes);
 
-    for (route_path, file_path) in routes_info {
+    for (route_path, file_path, loader) in routes_info {
         let api_routes_clone = Arc::clone(&api_routes);
         let file_path_clone = file_path.clone();
         let route_path_clone = route_path.clone();
+        let loader_clone = loader;
 
         // Create method router for supported API handler exports.
         let method_router: MethodRouter = get({
             let api_routes = Arc::clone(&api_routes_clone);
             let file_path = file_path_clone.clone();
             let route_path = route_path_clone.clone();
+            let loader = loader_clone;
             move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>, body: String| {
                 let api_routes = Arc::clone(&api_routes);
                 let file_path = file_path.clone();
@@ -232,6 +260,7 @@ pub async fn register_api_routes(
                         body,
                         file_path,
                         route_path,
+                        loader,
                     )
                     .await
                 }
@@ -241,6 +270,7 @@ pub async fn register_api_routes(
             let api_routes = Arc::clone(&api_routes_clone);
             let file_path = file_path_clone.clone();
             let route_path = route_path_clone.clone();
+            let loader = loader_clone;
             move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>, body: String| {
                 let api_routes = Arc::clone(&api_routes);
                 let file_path = file_path.clone();
@@ -254,6 +284,7 @@ pub async fn register_api_routes(
                         body,
                         file_path,
                         route_path,
+                        loader,
                     )
                     .await
                 }
@@ -263,6 +294,7 @@ pub async fn register_api_routes(
             let api_routes = Arc::clone(&api_routes_clone);
             let file_path = file_path_clone.clone();
             let route_path = route_path_clone.clone();
+            let loader = loader_clone;
             move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>, body: String| {
                 let api_routes = Arc::clone(&api_routes);
                 let file_path = file_path.clone();
@@ -276,6 +308,7 @@ pub async fn register_api_routes(
                         body,
                         file_path,
                         route_path,
+                        loader,
                     )
                     .await
                 }
@@ -285,6 +318,7 @@ pub async fn register_api_routes(
             let api_routes = Arc::clone(&api_routes_clone);
             let file_path = file_path_clone.clone();
             let route_path = route_path_clone.clone();
+            let loader = loader_clone;
             move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>, body: String| {
                 let api_routes = Arc::clone(&api_routes);
                 let file_path = file_path.clone();
@@ -298,6 +332,7 @@ pub async fn register_api_routes(
                         body,
                         file_path,
                         route_path,
+                        loader,
                     )
                     .await
                 }
@@ -347,6 +382,7 @@ async fn handle_api_request(
     body: String,
     file_path: String,
     route_path: String,
+    loader: &'static str,
 ) -> impl IntoResponse {
     let headers_map: HashMap<String, String> = headers
         .iter()
@@ -359,7 +395,7 @@ async fn handle_api_request(
         .collect();
 
     let request = ApiRequest {
-        url: route_path,
+        url: route_path.clone(),
         headers: headers_map,
         method: method.to_string(),
         query,
@@ -369,9 +405,37 @@ async fn handle_api_request(
 
     let method_str = method.as_str();
 
+    // Capture the request payload up-front for the devtools panel. Serialization
+    // only happens when a hub is attached (development mode).
+    let mut trace = api_routes.debug_hub.as_ref().map(|_| {
+        let mut trace =
+            ApiTraceEvent::new(method_str, route_path.as_str(), file_path.as_str(), loader);
+        trace.request = serde_json::to_string(&request).ok().map(truncate_payload);
+        trace
+    });
+
+    let started = Instant::now();
     let result = api_routes
         .call_handler(&file_path, method_str, request)
         .await;
+
+    if let Some(trace) = trace.as_mut() {
+        trace.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        match &result {
+            Ok(response) => {
+                trace.status = Some(response.status);
+                trace.response = serde_json::to_string(&response.body)
+                    .ok()
+                    .map(truncate_payload);
+            }
+            Err(e) => trace.error = Some(e.to_string()),
+        }
+
+        if let Some(hub) = api_routes.debug_hub.as_ref() {
+            hub.record(DebugEvent::ApiTrace(trace.clone()));
+        }
+    }
 
     match result {
         Ok(response) => (
@@ -403,7 +467,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
 
         let base_router = Router::new();
-        let (_router, routes) = register_api_routes(base_router, root).await.unwrap();
+        let (_router, routes) = register_api_routes(base_router, root, None).await.unwrap();
 
         assert!(routes.is_none());
     }
@@ -415,7 +479,7 @@ mod tests {
         fs::create_dir_all(root.join("src/api")).unwrap();
 
         let base_router = Router::new();
-        let (router, routes) = register_api_routes(base_router, root).await.unwrap();
+        let (router, routes) = register_api_routes(base_router, root, None).await.unwrap();
         let _ = router;
         assert!(routes.is_none());
     }
@@ -496,5 +560,65 @@ mod tests {
 
         assert_eq!(headers.len(), 1);
         assert!(headers.contains_key(header::CONTENT_TYPE));
+    }
+
+    #[test]
+    fn loader_name_maps_supported_loaders() {
+        assert_eq!(loader_name(Tag::NodeJS), "node");
+        assert_eq!(loader_name(Tag::Python), "python");
+        assert_eq!(loader_name(Tag::Ruby), "ruby");
+    }
+
+    #[tokio::test]
+    async fn handle_api_request_records_error_trace_on_hub() {
+        let hub = Arc::new(DebugHub::new(10));
+        let routes = Arc::new(ApiRoutes::new().with_debug_hub(Arc::clone(&hub)));
+
+        let response = handle_api_request(
+            routes,
+            HeaderMap::new(),
+            Method::GET,
+            HashMap::new(),
+            String::new(),
+            "src/api/hello.js".to_string(),
+            "/api/hello".to_string(),
+            "node",
+        )
+        .await;
+        let _ = response.into_response();
+
+        let history = hub.history();
+        assert_eq!(history.len(), 1);
+        match &history[0] {
+            DebugEvent::ApiTrace(event) => {
+                assert_eq!(event.route, "/api/hello");
+                assert_eq!(event.file, "src/api/hello.js");
+                assert_eq!(event.loader, "node");
+                assert_eq!(event.status, None);
+                assert!(event.error.is_some());
+                assert!(event.request.is_some());
+                assert_eq!(event.id, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_api_request_without_hub_still_responds() {
+        let routes = Arc::new(ApiRoutes::new());
+
+        let response = handle_api_request(
+            routes,
+            HeaderMap::new(),
+            Method::POST,
+            HashMap::new(),
+            r#"{"a":1}"#.to_string(),
+            "src/api/missing.py".to_string(),
+            "/api/missing".to_string(),
+            "python",
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
