@@ -1,4 +1,6 @@
-use std::sync::{Arc, Mutex};
+//! WebSocket server that pushes rebuild notifications and cached build errors
+//! to the browser, plus the middleware that injects the client script into HTML
+//! responses.
 
 use axum::{
     body::Body,
@@ -6,61 +8,28 @@ use axum::{
     middleware::Next,
 };
 use futures_util::{SinkExt, StreamExt};
-use metassr_build::rebuilder::RebuildType;
-use serde::Serialize;
-use tokio_tungstenite::tungstenite::Message;
-
 use tokio::{net::TcpStream, sync::broadcast::Receiver};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::info;
 
-#[derive(Debug, Serialize)]
-struct LiveReloadMessage {
-    #[serde(rename = "type")]
-    type_: String,
-    path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    errors: Option<Vec<String>>,
+use crate::{error_state::ErrorState, messages::LiveReloadMessage, LIVE_RELOAD_SCRIPT_PATH};
+
+/// Converts a rebuild event into the message sent to the browser. Kept as a
+/// function pointer so this crate does not need to depend on the build crate.
+pub type MessageMapper<E> = fn(&E) -> LiveReloadMessage;
+
+pub struct LiveReloadServer<E> {
+    receiver: Receiver<E>,
+    errors: ErrorState,
+    to_message: MessageMapper<E>,
 }
 
-trait RebuildTypeLiveReloadExt {
-    fn as_message(&self) -> LiveReloadMessage;
-}
-
-impl RebuildTypeLiveReloadExt for RebuildType {
-    fn as_message(&self) -> LiveReloadMessage {
-        match self {
-            RebuildType::Page(path) => LiveReloadMessage {
-                type_: "page".to_string(),
-                path: Some(path.to_string_lossy().to_string()),
-                errors: None,
-            },
-            RebuildType::BuildError { errors } => LiveReloadMessage {
-                type_: "build_error".to_string(),
-                path: None,
-                errors: Some(errors.clone()),
-            },
-            _ => LiveReloadMessage {
-                type_: self.to_string(),
-                path: None,
-                errors: None,
-            },
-        }
-    }
-}
-
-pub struct LiveReloadServer {
-    receiver: Receiver<RebuildType>,
-    last_errors: Arc<Mutex<Option<Vec<String>>>>,
-}
-
-impl LiveReloadServer {
-    pub fn new(
-        receiver: Receiver<RebuildType>,
-        last_errors: Arc<Mutex<Option<Vec<String>>>>,
-    ) -> Self {
+impl<E: Clone> LiveReloadServer<E> {
+    pub fn new(receiver: Receiver<E>, errors: ErrorState, to_message: MessageMapper<E>) -> Self {
         Self {
             receiver,
-            last_errors,
+            errors,
+            to_message,
         }
     }
 
@@ -74,7 +43,7 @@ impl LiveReloadServer {
         // immediately send the last known error if there is one on handshake,
         // but wait for the client's ready signal first so that the
         // onmessage handler is guaranteed to be in place before we push anything
-        let last_err_msgs = self.last_errors.lock().unwrap().clone();
+        let last_err_msgs = self.errors.get();
         if let Some(err_msgs) = last_err_msgs {
             // drain incoming frames until the client sends {type:"ready"}
             'ready: while let Some(msg_result) = ws_receiver.next().await {
@@ -86,14 +55,14 @@ impl LiveReloadServer {
                     }
                 }
             }
-            let message = RebuildType::BuildError { errors: err_msgs }.as_message();
+            let message = LiveReloadMessage::build_error(err_msgs);
             if let Ok(message_json) = serde_json::to_string(&message) {
                 let _ = ws_sender.send(Message::Text(message_json.into())).await;
             }
         }
 
         while let Ok(rebuild_type) = self.receiver.recv().await {
-            let message = rebuild_type.as_message();
+            let message = (self.to_message)(&rebuild_type);
             let message_json = serde_json::to_string(&message).unwrap();
 
             if let Err(e) = ws_sender.send(Message::Text(message_json.into())).await {
@@ -133,10 +102,8 @@ pub async fn inject_live_reload_script(
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Inject script before </body> or append if </body> is missing
-        let modified_body = body_str.replace(
-            "</body>",
-            r#"<script src="/livereload/script.js"></script></body>"#,
-        );
+        let script_tag = format!(r#"<script src="{LIVE_RELOAD_SCRIPT_PATH}"></script>"#);
+        let modified_body = body_str.replace("</body>", &format!("{script_tag}</body>"));
 
         return Ok(Response::builder()
             .status(parts.status)
@@ -158,7 +125,7 @@ mod tests {
         routing::get,
         Router,
     };
-    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use tower_service::Service;
 
     // ---- middleware tests ----
@@ -287,61 +254,60 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    // ---- message serialization (must match what live-reload.js parses) ----
-
-    #[test]
-    fn page_message_serializes_with_type_and_path() {
-        let msg = RebuildType::Page(PathBuf::from("src/pages/index.tsx")).as_message();
-        let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
-
-        assert_eq!(json["type"], "page");
-        assert_eq!(json["path"], "src/pages/index.tsx");
-    }
-
-    #[test]
-    fn non_page_message_serializes_with_null_path() {
-        let msg = RebuildType::Layout.as_message();
-        let json: serde_json::Value = serde_json::to_value(&msg).unwrap();
-
-        assert_eq!(json["type"], "layout");
-        assert!(json["path"].is_null());
-    }
-
     // ---- WebSocket server ----
 
+    fn echo(event: &String) -> LiveReloadMessage {
+        LiveReloadMessage::simple(event.clone())
+    }
+
     #[tokio::test]
-    async fn server_sends_rebuild_message_over_websocket() {
+    async fn server_forwards_events_over_websocket() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let (sender, _) = tokio::sync::broadcast::channel::<RebuildType>(16);
-
+        let (sender, _) = tokio::sync::broadcast::channel::<String>(16);
         let receiver = sender.subscribe();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let server = LiveReloadServer::new(receiver, Arc::new(Mutex::new(None)));
+            let server =
+                LiveReloadServer::new(receiver, ErrorState::new(), echo as MessageMapper<String>);
             server.handle_connection(stream).await;
         });
 
         let url = format!("ws://{}", addr);
         let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
-        // Page rebuild — should have type and path
-        sender
-            .send(RebuildType::Page(PathBuf::from("src/pages/about.tsx")))
-            .unwrap();
-
-        let msg = ws_stream.next().await.unwrap().unwrap();
-        let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
-        assert_eq!(json["type"], "page");
-        assert_eq!(json["path"], "src/pages/about.tsx");
-
-        // Style rebuild — should have type only
-        sender.send(RebuildType::Style).unwrap();
+        sender.send("style".to_string()).unwrap();
 
         let msg = ws_stream.next().await.unwrap().unwrap();
         let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert_eq!(json["type"], "style");
-        assert!(json["path"].is_null());
+    }
+
+    #[tokio::test]
+    async fn server_sends_cached_error_after_ready() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (sender, _) = tokio::sync::broadcast::channel::<String>(16);
+        let receiver = sender.subscribe();
+        let errors = ErrorState::from(Arc::new(Mutex::new(Some(vec!["boom".to_string()]))));
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let server = LiveReloadServer::new(receiver, errors, echo as MessageMapper<String>);
+            server.handle_connection(stream).await;
+        });
+
+        let url = format!("ws://{}", addr);
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws_stream
+            .send(Message::Text(r#"{"type":"ready"}"#.into()))
+            .await
+            .unwrap();
+
+        let msg = ws_stream.next().await.unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(json["type"], "build_error");
+        assert_eq!(json["errors"][0], "boom");
     }
 }

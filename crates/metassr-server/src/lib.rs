@@ -1,7 +1,6 @@
 mod fallback;
 mod handler;
 mod layers;
-pub mod live_reload;
 mod router;
 
 use fallback::Fallback;
@@ -11,8 +10,11 @@ use layers::tracing::{LayerSetup, TracingLayer, TracingLayerOptions};
 use anyhow::Result;
 use axum::routing::get;
 use axum::{http::StatusCode, response::Redirect, Router};
-use live_reload::LiveReloadServer;
-use metassr_build::rebuilder::Rebuilder;
+use metassr_build::rebuilder::{RebuildType, Rebuilder};
+use metassr_devtools::{
+    inject_live_reload_script, live_reload_script, ErrorState, LiveReloadMessage, LiveReloadServer,
+    LIVE_RELOAD_SCRIPT_PATH,
+};
 use router::RouterMut;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -25,7 +27,14 @@ use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 use tracing::{debug, info, warn};
 
-use crate::live_reload::inject_live_reload_script;
+/// Maps a rebuild event to the message pushed to the browser.
+fn rebuild_to_message(rebuild_type: &RebuildType) -> LiveReloadMessage {
+    match rebuild_type {
+        RebuildType::Page(path) => LiveReloadMessage::page(path.to_string_lossy()),
+        RebuildType::BuildError { errors } => LiveReloadMessage::build_error(errors.clone()),
+        other => LiveReloadMessage::simple(other.to_string()),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ServerMode {
@@ -97,12 +106,11 @@ impl Server {
             debug!("Configuring server for development mode");
             let ws_port = self.configs.ws_port;
             // Inject the ws_port into the live-reload script at runtime
-            let live_reload_script =
-                include_str!("scripts/live-reload.js").replace("__WS_PORT__", &ws_port.to_string());
+            let script = live_reload_script(ws_port);
             base_router = base_router.route(
-                "/livereload/script.js",
+                LIVE_RELOAD_SCRIPT_PATH,
                 get(move || {
-                    let script = live_reload_script.clone();
+                    let script = script.clone();
                     async move {
                         debug!("Serving live-reload.js");
                         axum::response::Response::builder()
@@ -126,8 +134,11 @@ impl Server {
             if let Some(rebuilder) = self.configs.rebuilder.clone() {
                 tokio::spawn(async move {
                     while let Ok((stream, _)) = ws_listener.accept().await {
-                        let live_reload =
-                            LiveReloadServer::new(rebuilder.subscribe(), rebuilder.last_errors());
+                        let live_reload = LiveReloadServer::new(
+                            rebuilder.subscribe(),
+                            ErrorState::from(rebuilder.last_errors()),
+                            rebuild_to_message,
+                        );
                         // live_reload.handle_connection(socket).await;
                         tokio::spawn(live_reload.handle_connection(stream));
                     }

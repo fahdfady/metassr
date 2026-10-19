@@ -1047,6 +1047,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "metassr-devtools"
+version = "1.0.0-alpha"
+dependencies = [
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "metassr-fs-analyzer"
 version = "1.0.0-alpha"
 dependencies = [
@@ -1071,20 +1085,17 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
- "futures-util",
  "metacall",
  "metacall-sys",
  "metassr-api-handler",
  "metassr-build",
+ "metassr-devtools",
  "metassr-fs-analyzer",
  "metassr-utils",
  "notify",
- "serde",
- "serde_json",
  "socket2",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tower-http",
  "tower-layer",
  "tower-service",
